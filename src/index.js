@@ -5,10 +5,18 @@ const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const path = require('path');
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 
 const AUTH_FOLDER = path.join(__dirname, '..', 'auth_info');
 const LADA = process.env.LADA || '52';
 const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY;
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || '20', 10);
+
+if (!API_KEY) {
+    console.error('ERROR: Falta API_KEY en el .env. Genera una con: openssl rand -hex 32');
+    process.exit(1);
+}
 
 let sockGlobal = null;
 
@@ -176,9 +184,36 @@ async function ejemploEnvioMensajes(sock) {
     console.log('Bot escuchando mensajes... (Ctrl+C para salir)');
 }
 
+/**
+ * Middleware: valida el header x-api-key contra API_KEY.
+ * Usa comparación de tiempo constante para evitar timing attacks.
+ */
+function requireApiKey(req, res, next) {
+    const provided = req.get('x-api-key') || '';
+    const expected = API_KEY;
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    const ok = a.length === b.length && require('crypto').timingSafeEqual(a, b);
+    if (!ok) {
+        return res.status(401).json({ error: 'No autorizado. Falta o es inválido el header x-api-key.' });
+    }
+    next();
+}
+
 function startApiServer() {
     const app = express();
-    app.use(express.json());
+    app.disable('x-powered-by');
+    app.use(express.json({ limit: '1mb' }));
+
+    // Límite de peticiones por IP (protege tu número de baneo por spam)
+    const limiter = rateLimit({
+        windowMs: 60 * 1000,
+        max: RATE_LIMIT_MAX,
+        standardHeaders: true,
+        legacyHeaders: false,
+        message: { error: 'Demasiadas peticiones. Espera un momento.' },
+    });
+    app.use(limiter);
 
     function checkConnection(res) {
         if (!sockGlobal) {
@@ -189,7 +224,7 @@ function startApiServer() {
     }
 
     // POST /mensaje  { "numero": "1234567890", "texto": "Hola" }
-    app.post('/mensaje', async (req, res) => {
+    app.post('/mensaje', requireApiKey, async (req, res) => {
         if (!checkConnection(res)) return;
         const { numero, texto } = req.body;
         if (!numero || !texto) return res.status(400).json({ error: 'Faltan campos: numero, texto' });
@@ -202,7 +237,7 @@ function startApiServer() {
     });
 
     // POST /mensaje-grupo  { "groupId": "120363XXX@g.us", "texto": "Hola grupo" }
-    app.post('/mensaje-grupo', async (req, res) => {
+    app.post('/mensaje-grupo', requireApiKey, async (req, res) => {
         if (!checkConnection(res)) return;
         const { groupId, texto } = req.body;
         if (!groupId || !texto) return res.status(400).json({ error: 'Faltan campos: groupId, texto' });
@@ -215,7 +250,7 @@ function startApiServer() {
     });
 
     // GET /grupos
-    app.get('/grupos', async (req, res) => {
+    app.get('/grupos', requireApiKey, async (req, res) => {
         if (!checkConnection(res)) return;
         try {
             const lista = await listarGrupos(sockGlobal);
