@@ -1,0 +1,13 @@
+services:
+  wa-bot:
+    build: .
+    container_name: wa-bayles
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Persiste la sesión QR entre reinicios
+      - ./auth_info:/app/auth_info
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    stdin_open: true
+    tty: true
